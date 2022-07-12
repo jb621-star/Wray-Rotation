@@ -72,43 +72,7 @@ write_csv(x_0011_df_phyloP_all, "/Users/jamesonblount/Documents/Wray_Rotation/Ca
 
 x_0011_df_phyloP_all <- read_csv("/Users/jamesonblount/Documents/Wray_Rotation/Carl/X_0012/data/x_0011_df_phyloP.csv")
 
-# To plot the different PhyloP scores and compare the scores for the same region, 
-# we need to convert the same coordinates into separate bedgraphs for comparison
-x_0011_bedgraph_242mammals <- x_0011_df_phyloP_all %>% 
-  select(seqnames, start, end, PhyloP_mammals_score) %>% 
-  rename(chrom = seqnames,
-         chromStart = start,
-         chromEnd = end,
-         score = PhyloP_mammals_score)
-x_0011_bedgraph_242mammals$chrom <- as.factor(x_0011_bedgraph_242mammals$chrom)
-x_0011_bedgraph_242mammals$chromStart <- as.integer(x_0011_bedgraph_242mammals$chromStart)
-x_0011_bedgraph_242mammals$chromEnd <- as.integer(x_0011_bedgraph_242mammals$chromEnd)
-x_0011_bedgraph_242mammals$score <- as.integer(x_0011_bedgraph_242mammals$score)
-write.table(x_0011_bedgraph_242mammals, file="/Users/jamesonblount/Documents/Wray_Rotation/Code/phyloP_data/242way_mammals.bedGraph", quote=F, sep="\t", row.names=F, col.names=F)
-
-x_0011_bedgraph_41primates <- x_0011_df_phyloP_all %>% 
-  select(seqnames, start, end, PhyloP_primates_score) %>% 
-  rename(chrom = seqnames,
-         chromStart = start,
-         chromEnd = end,
-         score = PhyloP_primates_score)
-x_0011_bedgraph_41primates$chrom <- as.factor(x_0011_bedgraph_41primates$chrom)
-x_0011_bedgraph_41primates$chromStart <- as.integer(x_0011_bedgraph_41primates$chromStart)
-x_0011_bedgraph_41primates$chromEnd <- as.integer(x_0011_bedgraph_41primates$chromEnd)
-write.table(x_0011_bedgraph_41primates, file="/Users/jamesonblount/Documents/Wray_Rotation/Code/phyloP_data/41way_primates.bedGraph", quote=F, sep="\t", row.names=F, col.names=F)
-
-x_0011_bedgraph_41placental <- x_0011_df_phyloP_all %>% 
-  select(seqnames, start, end, PhyloP_placental_score) %>% 
-  rename(chrom = seqnames,
-         chromStart = start,
-         chromEnd = end,
-         score = PhyloP_placental_score)
-x_0011_bedgraph_41placental$chrom <- as.factor(x_0011_bedgraph_41placental$chrom)
-x_0011_bedgraph_41placental$chromStart <- as.integer(x_0011_bedgraph_41placental$chromStart)
-x_0011_bedgraph_41placental$chromEnd <- as.integer(x_0011_bedgraph_41placental$chromEnd)
-write.table(x_0011_bedgraph_41placental, file="/Users/jamesonblount/Documents/Wray_Rotation/Code/phyloP_data/41way_placental.bedGraph", quote=F, sep="\t", row.names=F, col.names=F)
-
-#This is where the real bedGraph conversion begins
+# Convert the phyloP tracks into bedGraph files for vizualization and intersection
 x_0011_df_phyloP_compare <- x_0011_df_phyloP_all %>% 
   select(seqnames, start, end, PhyloP_mammals_score, PhyloP_primates_score, PhyloP_placental_score)
 
