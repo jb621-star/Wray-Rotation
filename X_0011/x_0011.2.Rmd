@@ -1,0 +1,346 @@
+---
+title: "x_0011.2"
+author: "Carl"
+date: "3/30/2021"
+output: html_document
+---
+condensing notes from x_0011.1 to a more manageable document. 
+```{r}
+#load libraries
+library(ggplot2)
+library(here)
+library(tidyverse)
+library(magrittr)
+library(viridis)
+library(parallel)
+library(tictoc)
+library(janitor)
+library(markdown)
+library(curl)
+library(biomaRt)
+library(rtracklayer)
+library(MASS)
+library(GenomicRanges)
+library(plyranges)
+library(randomForest)
+
+devtools::install_github("rstudio/tensorflow")
+library(tensorflow)
+install_tensorflow()
+
+
+#convenience fxn for printing
+conde <- function(obj) {
+  obj <- obj %>% as.data.frame() %>% rownames_to_column()
+  return(obj)
+}
+
+#read in data
+SE <- read_csv(file = here::here("data", "K562-DHS-v6.noChIP.csv"))
+
+#read in data dictionary
+DD <- read_tsv(file = here::here("data", "README_K562-DHS-v6-noChIP.txt"))
+
+#pull down depmap data and filter
+library("depmap")
+library("ExperimentHub")
+achilles <- depmap_crispr()
+achilles_K562 <- achilles %>% filter(depmap_id == "ACH-000551")
+
+#renaming an achilles column to match SE for easy joins
+colnames(achilles_K562) <- c("depmap_id", "gene", "dependency", "geneId", "gene_name", "cell_line")
+#join
+SE_depmap <- left_join(SE, achilles_K562, "geneId")
+
+#make density fxn
+
+get_density <- function(x, y, ...) {
+  dens <- MASS::kde2d(x, y, ...)
+  ix <- findInterval(x, dens$x)
+  iy <- findInterval(y, dens$y)
+  ii <- cbind(ix, iy)
+  return(dens$z[ii])
+}
+
+set.seed(1)
+dat <- data.frame(
+  x = c(
+    rnorm(1e4, mean = 0, sd = 0.1),
+    rnorm(1e3, mean = 0, sd = 0.1)
+  ),
+  y = c(
+    rnorm(1e4, mean = 0, sd = 0.1),
+    rnorm(1e3, mean = 0.1, sd = 0.2)
+  )
+)
+
+#clean out NAs, make data object for plotting
+SP5 <- SE_depmap %>% 
+      dplyr::select(name, geneId, gene_name, wgCERES_score,  dependency, distanceToTSS, dhs_score, dhs_score_nosig) %>% 
+      filter(!is.na(dependency)) %>%
+      filter(!is.na(wgCERES_score)) %>%
+      filter(!is.na(dhs_score)) %>%
+      filter(!(dhs_score == 0))
+#density estimation
+SP5$wgCERES_score_depmap_density <- get_density(x = SP5$dependency, y = SP5$wgCERES_score, h=c(0.1, 2.5), n=100)
+SP5$dhs_score_depmap_density <- get_density(x = SP5$dependency, y = SP5$dhs_score, h=c(0.1, 2.5), n=100)
+#plot with lm
+ggplot(SP5) + geom_point(aes(x = dependency, y = wgCERES_score, color = wgCERES_score_depmap_density)) + scale_color_viridis(option = "A") +  geom_smooth(data = SP5, mapping = aes(x = dependency, y = wgCERES_score), method = 'lm', se = T) 
+
+ggplot(SP5) + 
+  geom_point(aes(x = dependency, y = dhs_score, color = dhs_score_depmap_density)) + scale_color_viridis(option = "A") +  geom_smooth(data = SP5, mapping = aes(x = dependency, y = dhs_score), method = 'lm', se = T) 
+
+#hows the model look?
+model <- lm(formula = SP5$dependency ~ SP5$wgCERES_score, data = SP5)
+summary(model)
+
+model <- lm(formula = SP5$dependency ~ SP5$dhs_score, data = SP5)
+summary(model)
+
+#read in selection/evolutionary data
+PC <- read_csv(file = here::here("data", "K562.selection.csv"))
+
+#separate location column
+PC %<>% separate(col = chromosome, into = c("chrom", "chromPos"), sep = ":", remove = T) %>%
+  separate(col = chromPos, into = c("chromStart", "chromEnd"), sep = "-", remove = T)
+
+#convert SEdepmap to Grange
+SE_depmap_2 <- SE_depmap
+SE_depmap_2$strand <- NULL
+SE_GR <- makeGRangesFromDataFrame(df = SE_depmap_2, keep.extra.columns = T, ignore.strand = T, seqnames.field = "chrom", start.field = "chromStart", end.field = "chromEnd")
+#convert PC to granges
+PC_GR <- makeGRangesFromDataFrame(df = PC, keep.extra.columns = T, ignore.strand = T, seqnames.field = "chrom", start.field = "chromStart", end.field = "chromEnd")
+
+#trying a few joins because they are not 100% intuitive. 
+PC_SE_joined <- join_overlap_left(x = SE_GR, y = PC_GR)
+summary(PC_SE_joined)
+PC_SE_joinded_df <- GenomicRanges::as.data.frame(PC_SE_joined)
+summary(PC_SE_joinded_df)
+summary(PC)
+
+#rename
+df <- PC_SE_joinded_df
+df %<>% filter(!is.na(pval.human))
+summary(df)
+
+
+#explore data
+
+#make data object for plotting
+SP6 <- df %>% 
+      dplyr::select(name, geneId, gene_name, wgCERES_score,  dependency, distanceToTSS, dhs_score, dhs_score_nosig, pval.human, pval.chimp, zeta.human, zeta.chimp, PP_con, PP_acc, PhastCons) 
+
+#plots
+#zeta human
+ggplot(SP6) + 
+  geom_point(aes(x = dhs_score_nosig, y = zeta.human, color = dependency)) + scale_color_viridis(option = "A")
+#zeta chimp
+ggplot(SP6) + 
+  geom_point(aes(x = dhs_score_nosig, y = zeta.chimp, color = dependency)) + scale_color_viridis(option = "A") 
+
+#strong dependency only plots
+SP7 <- SP6 %>% filter(dependency <= -1)
+#seta human
+ggplot(SP7) + 
+  geom_point(aes(x = dhs_score_nosig, y = zeta.human, color = dependency)) + scale_color_viridis(option = "A")
+#zeta chimp
+ggplot(SP7) + 
+  geom_point(aes(x = dhs_score_nosig, y = zeta.chimp, color = dependency)) + scale_color_viridis(option = "A") 
+
+#plots sub ceres_score
+
+#plots
+#zeta human
+ggplot(SP6) + 
+  geom_point(aes(x = wgCERES_score, y = zeta.human, color = dependency)) + scale_color_viridis(option = "A")
+#zeta chimp
+ggplot(SP6) + 
+  geom_point(aes(x = wgCERES_score, y = zeta.chimp, color = dependency)) + scale_color_viridis(option = "A") 
+
+#strong dependency only plots
+SP7 <- SP6 %>% filter(dependency <= -1)
+#seta human
+ggplot(SP7) + 
+  geom_point(aes(x = wgCERES_score, y = zeta.human, color = dependency)) + scale_color_viridis(option = "A")
+#zeta chimp
+ggplot(SP7) + 
+  geom_point(aes(x = wgCERES_score, y = zeta.chimp, color = dependency)) + scale_color_viridis(option = "A") 
+```
+
+random forest attempt (messy)
+
+```{r}
+# random forest - make predictor df (excluding NAs) and output df with wgCERESscore. separate test sets
+rf_pred_df <- df %>% 
+      dplyr::select(name, wgCERES_score_nosig, dependency, distanceToTSS, zeta.human, zeta.chimp, PP_con, PP_acc, PhastCons, ploidyZhou, probIntolerantLoF, numTKOHits_Hart, H3K27ac_CPM_per_1kbp, chromHMM_cat_longest, wgCERES_score_top10) %>% 
+      filter(!is.na(dependency)) %>%                        #
+      filter(!is.na(probIntolerantLoF)) %>%                 ##
+      filter(!is.na(probIntolerantLoF)) %>%                 ### Get rid of NAs among important predictors.
+      filter(!is.na(numTKOHits_Hart)) %>%                   ##
+      filter(!is.na(H3K27ac_CPM_per_1kbp)) %>% 
+      filter(!(name %in% test_names))
+
+rf_resp_df <- rf_pred_df %>%  #na.omit() %>%                 #   Making a response variable and omitting all nas (cant do this above, yet)
+      dplyr::select(wgCERES_score_nosig)                    #
+rf_pred_df$wgCERES_score_nosig <- NULL                      #   remove response from predictor set
+summary(rf_pred_df)                                         #
+nrow(rf_pred_df)                                            ### 
+summary(rf_resp_df)                                         ###  make sure NAs are gone and sets are correct number of rows. 
+nrow(rf_resp_df)                                            #
+
+
+
+# test set data
+rf_pred_test <- rf_pred_df %>% filter(!is.na(wgCERES_score_top10))
+rf_resp_test <- rf_pred_test %>% dplyr::select(wgCERES_score_top10)
+rf_pred_test$wgCERES_score_top10 <- NULL
+rf_pred_test$wgCERES_score <- NULL
+rf_pred_df %<>% dplyr::select(!(wgCERES_score_top10))
+
+# remove test set observations from training set. Test set is that which has been validated by f/u screen. Arguably not the same output. trying anyways. 
+test_names <- rf_pred_test$name %>% as.list()
+rf_pred_df %<>% filter(!(name %in% test_names))
+rf_resp_df %<>% filter(!(name %in% test_names))
+rf_pred_df$wgCERES_score_top10 <- NULL
+
+#create response vectors
+rf_resp_vector <- as.vector(rf_resp_df$wgCERES_score_nosig)
+rf_resp_vector_test <- as.vector(rf_resp_test$wgCERES_score_top10)
+
+# summary shows no na values. but still getting NA errors. backtracking to make removal explicit everywhere. 
+#rf_pred_df %<>% na.omit()
+#rf_pred_test %<>% na.omit()
+
+#Random forest regression. Tic/toc for timing. 
+
+tic()
+DHS_forest_notest <- randomForest(x = rf_pred_df, y = rf_resp_vector,  ntree = 1000,)
+toc() #about 45 sec
+tic()
+DHS_forest_tested <- randomForest(x = rf_pred_df, y = rf_resp_vector,  ntree = 1000, xtest = rf_pred_test, ytest = rf_resp_vector_test)
+toc() #about 45 sec
+
+#how does my forest look?
+randomForest::varImpPlot(x = DHS_forest_tested, sort = TRUE, n.var = 12)
+randomForest::varImpPlot(x = DHS_forest_notest, sort = TRUE, n.var = 12)
+DHS_forest_varUsage <- randomForest::varUsed(x = DHS_forest_notest, count = T)
+DHS_forest_varUsage %<>% as.data.frame() %>% t()
+colnames(DHS_forest_varUsage) <- colnames(rf_pred_df)
+conde(DHS_forest_varUsage)
+
+#how does it perform using screen validation data?
+print(DHS_forest_tested)
+print(DHS_forest_notest)
+```
+
+poorly, or the validation data is poor. retrying with a different validation strategy. 
+
+```{r}
+#make parent dataframes and summarize
+ForestData <- df %>% 
+      dplyr::select(name, wgCERES_score_nosig, signalValue, pValue, DHS_prop_repeat, DHS_length, DHS_prop_GC, n_SNV_Zhou_per_bp, dependency, distanceToTSS, zeta.human, zeta.chimp, PP_con, PP_acc, PhastCons, ploidyZhou, probIntolerantLoF, numTKOHits_Hart, H3K27ac_CPM_per_1kbp, chromHMM_cat_longest, DNase_CPM_per_1kbp, annotation, dhs_0_1_wg) %>% 
+      na.omit()
+     
+summary(ForestData)
+
+#ID sites in f/u screen
+Fu_data <- df %>% 
+      dplyr::select(name, wgCERES_score_nosig, signalValue, pValue, DHS_prop_repeat, DHS_length, DHS_prop_GC, n_SNV_Zhou_per_bp, dependency, distanceToTSS, zeta.human, zeta.chimp, PP_con, PP_acc, PhastCons, ploidyZhou, probIntolerantLoF, numTKOHits_Hart, H3K27ac_CPM_per_1kbp, chromHMM_cat_longest, DNase_CPM_per_1kbp, annotation, dhs_0_1_wg, dhs_0_1_distal) %>% 
+      na.omit()
+# Fu_names <- Fu_data$name %>% as.vector()
+# #filter on sites that successfully validated
+# Forest_fu_val <- Fu_data %>% filter(dhs_0_1_wg == dhs_0_1_distal)
+# Fu_val_names <- Forest_fu_val$name %>% as.vector()
+
+#make training response vectors 
+ForestOutput_CERES <- ForestData$wgCERES_score_nosig %>% as.vector() 
+ForestOutput_Signal <- ForestData$signalValue %>% as.vector()
+ForestOutput_pVal <- ForestData$pValue %>% as.vector()
+ForestOutput_dhs_wg_sig <- ForestData$dhs_0_1_wg %>% as.vector()
+
+#make training input dataframe 
+ForestInput <- ForestData %>% 
+      dplyr::select(-c(wgCERES_score_nosig, signalValue, pValue, dhs_0_1_wg))
+
+#testing outputs   -getting NA errors in 
+FuOutput_CERES <- Fu_data$wgCERES_score_nosig %>% as.vector() 
+FuOutput_Signal <- Fu_data$signalValue %>% as.vector()
+FuOutput_pVal <- Fu_data$pValue %>% as.vector()
+FuOutput_dhs_wg_sig <- Fu_data$dhs_0_1_wg %>% as.vector()
+
+#testing input
+FuInput <- Fu_data %>% 
+      dplyr::select(-c(wgCERES_score_nosig, signalValue, pValue, dhs_0_1_wg, dhs_0_1_distal))
+
+
+#hitting a wall here. will need to run this on the cluster. 
+
+#construct Random Forests
+tic()
+CERES_Forest <- randomForest(x = ForestInput[1:5000,], y = ForestOutput_CERES[1:5000],  ntree = 500)
+toc() 
+
+randomForest::varImpPlot(x = CERES_Forest, sort = TRUE, n.var = 19)
+ggsave(filename = CERES_Forest_VarImpPlot, plot = CERES_Forest_VarImpPlot, device = "tiff")
+CERES_Forest_varUsage <- randomForest::varUsed(x = CERES_Forest, count = T)
+CERES_Forest_varUsage %<>% as.data.frame() %>% t()
+colnames(CERES_Forest_varUsage) <- colnames(ForestInput)
+conde(CERES_Forest_varUsage)
+write_csv(x = CERES_Forest_varUsage, file = "CERES_Forest_varUsage.csv")
+print(CERES_Forest)
+saveRDS(CERES_Forest, file = here::here(""))
+
+
+saveRDS(achilles_cor, file = here::here("data", paste0(release, "_achilles_cor.Rds")))
+
+
+tic()
+CERES_Forest_tested <- randomForest(x = ForestInput, y = ForestOutput_CERES, ntree = 250, xtest = FuInput, ytest = FuOutput_CERES)
+toc()
+
+#how does my forest look?
+
+randomForest::varImpPlot(x = DHS_forest_notest, sort = TRUE, n.var = 12)
+CERES_Forest_varUsage <- randomForest::varUsed(x = CERES_Forest, count = T)
+CERES_Forest_varUsage %<>% as.data.frame() %>% t()
+colnames(CERES_Forest_varUsage) <- colnames(ForestInput)
+conde(CERES_Forest_varUsage)
+write_csv(x = CERES_Forest_varUsage, file = "CERES_Forest_varUsage.csv")
+
+#how does it perform using screen validation data?
+print(DHS_forest_tested)
+print(DHS_forest_notest)
+
+```
+
+so, shifting everything over to hardac, I split stuff up into scripts to source. There appear to be several packages that I am having trouble loading, and this gets a bit silly. 
+
+in my scripts directory, there is a submission script (x_0011_vanForest_batch.sh), an R script (x_0011_vanillaForest.R), and several scripts to source. In order, those are: tidyverse_but_stupid.R, x_0011_fxns.R, and x_0011_forest_IO.R. These load packages, create functions, and prep data for the random forest, respectively. data is fed in as a csv made from the df object here. I really wish I could just load tidyverse here. 
+
+2021/04/07
+I got one rf call to run, finally. time to parallelize. generating one rscript per rf call, and parellizing via --wrap in the sbatch call w/ for loop. 
+I switched to DCC for ease of loading R/4.0.3, on which a lot of my packages depend. This has been much easier - I am having fewer silly environment struggles. 
+
+Transitioning to x_0012 soon, where all these attempts at shifting to cluster computing are cataloged. 
+
+directory structure on cluster: 
+x_0012/
+x_0012/RImages/
+x_0012/data/
+x_0012/data/x_0011_df.csv
+x_0012/results/
+x_0012/scripts/
+x_0012/scripts/batch_rf.sh
+x_0012/scripts/slurm-7323113.out
+x_0012/scripts/slurm-7323114.out
+x_0012/scripts/x_0011_forest_io.R
+x_0012/scripts/x_0011_fxns.R
+x_0012/scripts/x_0011_lib-data.R
+x_0012/scripts/x_0012_rf1.R
+x_0012/scripts/x_0012_rf2.R
+x_0012/scripts/trashed/
+
+I've pulled down these files and am syncing to dropbox. They essentially divide the code from this markdown document into a few chunks. x_0012_rf reads in data, loads libraries, and sources forest_io and fxns. fxns contains functions, forest_io turns the large dataframe into a smaller data set for analysis and divides it into input dataframes in tidy format and matching output vectors. batch_rf.sh is a shell script for submission of these jobs to the cluster. 
+
+```{r}
+#save stuff. 

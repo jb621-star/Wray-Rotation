@@ -1,0 +1,651 @@
+---
+title: "x_0011 notebook"
+author: "Carl"
+date: "3/4/2021"
+output: html_document
+---
+
+'experiment ID' is x_0011. I should probably come up with a better way of defining what constitutes an individual experiment/analysis and cataloging my notes, as my current system is starting to show its faults - chiefly that it was really designed for the bench. Soliciting input from people (researchgate, cohort, jesse, sophie, labmates, etc.)
+
+Asked Dr. Wray about note preferences, and going to press on with markdown. 
+
+abbreviations:
+RE = regulatory element
+TSStrue = REs that act on the gene with the nearest TSS. 
+TSSfalse = REs that do not act on the gene with the nearest TSS.
+
+Basic idea for this project: There is a CRISPR screen in K562 cells from the Gerschbach lab that generates indels in a bunch of regulatory elements and looks at competitive growth as a readout. Apparently this is a pretty massive experiment. From what I understand, they used distance to nearest TSS to predict the gene that a given regulatory element was acting on. This metric is apparently about 80% accurate. Additionally, they did a smaller validation experiment (which, incredibly, sounds like it was approximately the size of a full-on whole genome screen w/ GeCKO library) and only about 30% of sites validated. This is surprising - I generally think of this screening methodology as very robust. I do not know if they validated these using a second screen, or in single-guide competitive growth (e.g., by flow cytometry). I will have to wait to get my hands on a manuscript or for an opportunity to talk to someone in that lab to find out. 
+
+Either way, this looks like a large and fairly granular data set to work with, and presents some opportunities for me to learn new computational techniques, so I'm pressing forward. The issues they ran into raise a few questions, and I think they can both be answered with other publically available data. 
+
+
+For TSSfalse, can we identify the gene(s) they act on using HI-C data?
+Do a higher proportion of TSSfalse act on multiple sites than do TSStrue?
+Does HI-C data predict where a RE acts accurately in both groups (e.g., TSStrue and TSSfalse)?
+Make a combination classifier for these sites using RE gene association, gene depmap score, and gene expression in K562. 
+  can be basic mathematical: normalized expression * depmap score for associated gene. 
+      Does this agree with the screen data?
+      What about if we do this by nearest TSS and omit Hi-C data?
+
+First up, probably has to be learning about working with this data. Right now I have a data dictionary for the screen, and a sort of summarized experiment. There are several packages for analyzing screens from raw data (caRpools and CRISPRAnalyzeR), but this isnt that. Eventually I will want that raw data and to analyze it myself, but for now I can poke around this screen without doing any of that. 
+
+First big question about the data: is this the screen, or the validation experiment? loading a bunch of stuff I use regularly, and the data. 
+
+```{r}
+#load libraries
+library(ggplot2)
+library(here)
+library(tidyverse)
+library(magrittr)
+library(viridis)
+library(parallel)
+library(tictoc)
+library(janitor)
+library(markdown)
+library(curl)
+BiocManager::install("biomaRt")
+library(biomaRt)
+library(rtracklayer)
+library(MASS)
+library(GenomicRanges)
+BiocManager::install("plyranges")
+library(plyranges)
+library(randomForest)
+
+
+
+#convenience fxn for printing
+conde <- function(obj) {
+  obj <- obj %>% as.data.frame() %>% rownames_to_column()
+  return(obj)
+}
+```
+
+```{r}
+#read in data
+
+SE <- read_csv(file = here::here("Documents", "Wray_Rotation", "Carl", "X_0011","data", "K562-DHS-v6.noChIP.csv"))
+
+```
+well, some of this is pretty obvious, but a few column headers are really opaque. I think the first thing to notice here is that this is 112025 observations across 116 variables. v granular, but a lot of missing values. For the sake of scripting I should probably subset this, perhaps using a single chromosome, and then scale it up later. One of the advantages of subsetting by chromosome is that it is a sort of 'natural' division, and I should be able to analyze, for the most part, each chromosome independently from the others with both this data and the HIC data (that HIC paper didnt show a lot of cross-chromosome interaction). If that assumption is good, I have a stupid easy way to parallelize my code down the line. I think my next step must be to write a data generation script for subsetting. Later, I can ammend that script to generate data objects that incorporate HIC and screen data. 
+
+For now, I think I'm going to load in the data dictionary to have on hand as a guide. 
+
+```{r}
+#read in data dictionary
+
+DD <- read_tsv(file = here::here("Documents", "Wray_Rotation", "Carl", "X_0011","data", "README_K562-DHS-v6-noChIP.txt"))
+```
+Wow. I do not understand a lot of this. Emailing Alejo for some guidance. Would be really nice to have a protocol/manuscript from Gerschbach lab. or even just a deeper understanding of their design. 
+
+I recall from the call with Greg and Alejo yesterday that they validated some 10k-ish sites. I do not know if that validation was single gRNAs done like traditional validation (one-by-one with FC) or if that 10k represents 1000 sites with 10 guides per site[Jameson: I know this to be the actual case from my conversation with Greg today], or if this table summarizes 10k sites with 10 guides each. Regardless, I need an input and an output, so I need the original screen and a validation experiment (I think!). Possible I could do weird stats-y stuff to impute an outcome, for example by using depmap and expression data and HIC data, and then compare to the validation set later. 
+
+can still do some basic exploration and subsetting
+
+```{r}
+summary(SE)
+SE_chr1 <- SE %>% filter(chrom == "chr1")
+summary(SE_chr1)
+```
+
+well, that's at least useful in understanding where my NAs are. Apparently both the data from the whole genome screen and the validation experiment are summarized within this table, and are distinguished by the _wg and _distal tags, respectively. 
+
+One thing I think I ought to do is eliminate lot of these columns full of NAs. Also, it *appears* that all these essentiality scores are from experiments that integrate data well beyond K562. Why not use the depmap K562 data exclusively? How big is that depmap data?
+
+Still working on understanding this data set and how it was generated. 
+
+3/9/21
+
+got the manuscript from gerschbach lab on Friday and have been reading it closely. They did much more than I had imagined, and made some decisions in screening that I maybe wouldnt have made. Their goals seem to have been to generate a generalizable data set - to say things about the screened DHS's broadly, rather than about their behavior in this cell line. I am imagining that re-analysis with data more specific to the cell line may be the highest-level change I can make to reveal new information. There are two places where I think this can happen with the screen data:
+
+1. Use Depmap data aggregated by gene in K562 in place of all the other 'essentiality' scores used. 
+2. Identify gene targets by HI-C contact frequency using HI-C data generated in K562 cells. 
+3. Generate specific hypotheses from first principals about the effect of the dCas9-KRAB on DHSs by chromHMM/segway annotation. 
+4. Exclude promotors from the analysis
+5. 
+
+
+```{r}
+#what are the chromHMM/segway annotations?
+
+segwayannos <- SE %>% dplyr::select(segway_cat_longest) %>% distinct() %T>% print()
+HMMannos <- SE %>% dplyr::select(chromHMM_cat_longest) %>% distinct() %T>% print()
+#whats different?
+colnames(HMMannos) <- c("anno")
+colnames(segwayannos) <- c("anno")
+diffannos <- anti_join(HMMannos, segwayannos)
+print(diffannos)
+```
+so, the chromHMM annotations contain 'inactive promotor', which does not appear in segway annotations. segway annotations contain 'NA', which doesnt appear in the chromHMM annotations. 
+
+additionally, they do not always agree on the annotations. 
+
+so, lets start conservatively, filtering out any mention of promotor from either annotation group
+
+```{r}
+#how consistent is the promotor annotation between segway and chromHMM?
+pro <- c("Active Promoter", "Inactive Promoter", "Promoter Flanking")
+SE_HMMPro <- SE %>% filter(chromHMM_cat_longest %in% pro) 
+consensusProHMM <- SE_HMMPro %>% filter(chromHMM_cat_longest == segway_cat_longest) %T>% print()
+```
+So, there are 23,314 DHSs that are classified as either "active promoter", "inactive promoter" or "promoter flanking". Of subset, there are 7419 'consensus' annotations (which necessarily exclude "inactive promoter", because that annotation does not exist in segway_cat_longest). 
+
+How many consensus annotations exist, inclusive of promoters?
+```{r}
+SE_consensusAnno <- SE %>% filter(chromHMM_cat_longest == segway_cat_longest) 
+nrow(SE_consensusAnno)
+nrow(SE_consensusAnno)/nrow(SE)
+```
+so, for about 51.2% of DHSs, there is a consensus annotation. I could start there. Maybe with some first principals hypotheses?
+dCas9-KRAB associates with annotation type * depmap score, will it create a fitness effect and direction of that effect?
+
+Strong enhancers + KRAB ~= KO
+  same effect as observed in depmap. 
+Active Promoter + KRAB ~= KO
+  same effect as observed in depmap.
+Transcription Associated + KRAB ~= KO
+  
+Distal CTCF/Candidate Insulator + KRAB
+  
+Candidate Weak Enhancer
+  
+Polycomb repressed
+  
+Inactive Promoter
+  
+Low activity proximal to active states
+  
+Heterochromatin/Repetitive/Copy Number Variation
+  
+Promoter Flanking
+  
+
+I'm noticing there are no silencers/repressors annotated here. I should find a well characterized one and see if I can find it within this screen data. 
+
+I could do a simple subtractive analysis here...
+Honestly, I just need to get all my data together. Going to keep everything and just add on to it. 
+
+```{r}
+BiocManager::install("depmap")
+
+library("depmap")
+library("ExperimentHub")
+```
+loaded packages, loading in depmap data (v large). will need to filter and discard a lot - only want the summary-level K562 stuff here.
+
+```{r}
+achilles <- depmap_crispr()
+
+```
+yep, v big. 
+
+K562 is ACH-000551 in depmap (from their data downloader portal)
+```{r}
+achilles_K562 <- achilles %>% filter(depmap_id == "ACH-000551")
+```
+
+So my choices here are to merge by geneID, or to do something more sophisticated with HIC in the middle (to get better agreement with screen and depmap, as at present the screen DHSs are matched to genes by proximity only. porque no los dos?
+btw, someone passed this through excel at some point because when I sort on gene symbol I have some dates (e.g., 4-Oct). 
+
+```{r}
+#renaming an achilles column to match SE for easy joins
+colnames(achilles_K562) <- c("depmap_id", "gene", "dependency", "geneId", "gene_name", "cell_line")
+#join
+SE_depmap <- left_join(SE, achilles_K562, "geneId")
+```
+
+poke around a bit. Charlie's lab reports that hits (either direction) have different properties from non-hits (non-significant DHSs), among them the 'essentiality' of the nearest gene. None of these scores are K562 specific, however. I want to know the relationship between the guide enrichment/depletion and the dependency score from depmap. maybe start with a scatterplot. assemble variables I want to work with in a new object and clean. unsure if wgCERES_score is the right thing to go with, but that'll have to wait until I talk to someone. 
+
+```{r}
+SP <- SE_depmap %>% 
+      dplyr::select(name, geneId, gene_name, wgCERES_score,  dependency) %>% 
+      filter(!is.na(dependency))
+SP$wgCERES_score <- signif(x = SP$wgCERES_score, digits = 7)
+SP %<>% filter(!(wgCERES_score == 0.0000000))
+```
+
+removing zeros from wgCERES_score yeilds about 10k observations that are presumably significant in some direction. scatterplot time. and maybe linear regression or something. 
+
+```{r}
+SP %>% ggplot(aes(x = dependency, y = wgCERES_score)) +
+  geom_point()
+```
+
+what if I just hadn't done any/most of that filtering?
+
+```{r}
+SE_depmap %>%
+  ggplot(aes(x = dependency, y = wgCERES_score_nosig)) + 
+  geom_point()
+```
+
+basically the same, plus fat. am I not truly trimming out NS values here? trying using a different column from the summarized screen. 
+
+```{r}
+SE_depmap %>%
+  ggplot(aes(x = dependency, y = gRNA_0_01_wg)) + 
+  geom_point()
+```
+not super informative because it doesnt show density. 
+```{r}
+SE_depmap %>%
+  ggplot(aes(x = gRNA_0_01_wg, y = dependency, group)) + 
+  geom_boxplot(aes(group = cut_width(gRNA_0_01_wg, 1)), varwidth = T)
+
+SE_depmap %>%
+  ggplot(aes(x = gRNA_0_01_wg, y = dependency, group)) + 
+  geom_boxplot(aes(group = cut_width(gRNA_0_01_wg, 1)), notch = T)
+```
+first plot points to there being orders of magnitude more DHSs with 0 or 1 significant gRNAs than with multiple. expected, but makes the plot ugly. 
+
+second plot is interesting. non overlapping notches indicate significance, but unsure default alpha or test. will have to look into this more. still, this is a start. wondering what will happen if I remove the 0 bin and do some other fiddling. 
+
+```{r}
+SE_depmap %>% filter(!(gRNA_0_01_wg == 0)) %>%
+  ggplot(aes(x = gRNA_0_01_wg, y = dependency, group)) + 
+  geom_boxplot(aes(group = cut_width(gRNA_0_01_wg, 1)), notch = T, outlier.alpha = 0.1)
+SE_depmap %>% filter(!(gRNA_0_01_wg == 0)) %>% 
+  ggplot(aes(x = gRNA_0_01_wg, y = dependency, group)) + 
+  geom_boxplot(aes(group = cut_width(gRNA_0_01_wg, 1)), varwidth = T, outlier.alpha = 0.1)
+SE_depmap %>% filter(!(gRNA_0_01_wg == 0)) %>% filter(!(gRNA_0_01_wg == 1)) %>% 
+  ggplot(aes(x = gRNA_0_01_wg, y = dependency, group)) + 
+  geom_boxplot(aes(group = cut_width(gRNA_0_01_wg, 1)), varwidth = T, outlier.alpha = 0.1)
+SE_depmap %>% filter(!(gRNA_0_01_wg == 0)) %>% filter(!(gRNA_0_01_wg == 1)) %>% 
+  ggplot(aes(x = gRNA_0_01_wg, y = dependency, group)) + 
+  geom_boxplot(aes(group = cut_width(gRNA_0_01_wg, 1)), notch = T, outlier.alpha = 0.1)
+```
+more plotting using different x variables against depmap dependency
+
+```{r}
+SE_depmap %>% # filter(!(gRNA_0_01_wg == 0)) %>% filter(!(gRNA_0_01_wg == 1)) %>% 
+  ggplot(aes(x = gRNA_0_1_wg, y = dependency, group)) + 
+  geom_boxplot(aes(group = cut_width(gRNA_0_1_wg, 1)), notch = T, outlier.alpha = 0.1)
+```
+what might be better is that discreet scatterplot but with density in viridis. trying it. 
+
+```{r}
+
+#make density fxn
+
+get_density <- function(x, y, ...) {
+  dens <- MASS::kde2d(x, y, ...)
+  ix <- findInterval(x, dens$x)
+  iy <- findInterval(y, dens$y)
+  ii <- cbind(ix, iy)
+  return(dens$z[ii])
+}
+
+set.seed(1)
+dat <- data.frame(
+  x = c(
+    rnorm(1e4, mean = 0, sd = 0.1),
+    rnorm(1e3, mean = 0, sd = 0.1)
+  ),
+  y = c(
+    rnorm(1e4, mean = 0, sd = 0.1),
+    rnorm(1e3, mean = 0.1, sd = 0.2)
+  )
+)
+
+#clean out NAs, make data object for plotting, transform so all values positive
+SP2 <- SE_depmap %>% 
+      dplyr::select(name, geneId, gene_name, wgCERES_score,  dependency) %>% 
+      filter(!is.na(dependency)) %>%
+      filter(!is.na(wgCERES_score))
+# SP2$wgCERES_score <- (SP2$wgCERES_score + 100)
+# SP2$dependency <- (SP2$dependency + 10)
+#plot
+SP2$wgCERES_score_depmap_density <- get_density(x = (SP2$wgCERES_score), y = (SP2$dependency), h=c(0.0001, 0.09140544), n=1000)
+ggplot(SP2) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+```
+The default for h is to generate bandwidths using a normal reference bandwidth which must be strictly positive. The normal reference bandwidth function returns 0 for the wgCERES_score. I chose an arbitrary small scalar input for wgCERES_score instead, and used the normal reference bandwidth value for dependency. Should note that the two-dimensional kernel density estimation is slow. It appears the scalar h for wgCERES is not working (note the vertical line in my plot. I am going to try several values of h for wgCERES.) Also using a reduced number of bins (lower resolution estimation) in order to have this run faster. In the interest of finding out I'm going to time the estimator. 
+
+```{r}
+## CERES h = 0.0001  --5.01 sec
+tic()
+SP2$wgCERES_score_depmap_density <- get_density(x = (SP2$wgCERES_score), y = (SP2$dependency), h=c(0.0001, 0.09140544), n=100)
+toc()
+ggplot(SP2) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+## CERES h = 0.001 --4.64 sec
+tic()
+SP2$wgCERES_score_depmap_density <- get_density(x = (SP2$wgCERES_score), y = (SP2$dependency), h=c(0.001, 0.09140544), n=100)
+toc()
+ggplot(SP2) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+## CERES h = 0.01 -- 5.03 sec
+tic()
+SP2$wgCERES_score_depmap_density <- get_density(x = (SP2$wgCERES_score), y = (SP2$dependency), h=c(0.01, 0.09140544), n=100)
+toc()
+ggplot(SP2) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+## CERES h = 0.1 --5.03 sec
+tic()
+SP2$wgCERES_score_depmap_density <- get_density(x = (SP2$wgCERES_score), y = (SP2$dependency), h=c(0.1, 0.09140544), n=100)
+toc()
+ggplot(SP2) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+## CERES h = 0.5 -- 5.95 sec
+tic()
+SP2$wgCERES_score_depmap_density <- get_density(x = (SP2$wgCERES_score), y = (SP2$dependency), h=c(0.5, 0.09140544), n=100)
+toc()
+ggplot(SP2) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+
+```
+
+okay, so I have either a ton of zeros in wgCERES_score, or I need to commit to scalar bandwidths for both axes. trying both separately and together. 
+
+```{r}
+## large scalar h both axes
+tic()
+SP2$wgCERES_score_depmap_density <- get_density(x = (SP2$wgCERES_score), y = (SP2$dependency), h=c(0.5, 0.5), n=100)
+toc()
+ggplot(SP2) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+```
+
+```{r}
+##remove zeroes, large scalar bandwidth for x, normal ref bandwidth for y
+SP3 <- SP2 %>% filter(!(wgCERES_score == 0))
+SP3$wgCERES_score_depmap_density <- get_density(x = (SP3$wgCERES_score), y = (SP3$dependency), h=c(0.5, bandwidth.nrd(SP3$wgCERES_score)), n=100)
+toc()
+ggplot(SP3) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+```
+
+```{r}
+##remove zeroes, large scalar bandwidth for both axes
+SP3 <- SP2 %>% filter(!(wgCERES_score == 0))
+SP3$wgCERES_score_depmap_density <- get_density(x = (SP3$wgCERES_score), y = (SP3$dependency), h=c(0.5, 0.5), n=100)
+toc()
+ggplot(SP3) + geom_point(aes(x = wgCERES_score, y = dependency, color = wgCERES_score_depmap_density)) + scale_color_viridis()
+```
+
+so it doesnt really look like the zeroes were removed. I remember from yesterday that I wound up specifying a number of significant digits for the wgCERES scores approaching zero and filtering after that. going to implement that here. 
+
+
+```{r}
+#filter values approaching zero
+SP4 <- SP3
+SP4$wgCERES_score <- signif(x = SP$wgCERES_score, digits = 4)
+SP4 %<>% filter(!(wgCERES_score == 0.0000))
+#re-estimate
+tic()
+SP4$wgCERES_score_depmap_density <- get_density(x = SP4$dependency, y = SP4$wgCERES_score, h=c(0.1, 2.5), n=500)
+toc()
+#plot, swapping axes because i like it better visually. 
+
+ggplot(SP4) + geom_point(aes(x = dependency, y = wgCERES_score, color = wgCERES_score_depmap_density)) + scale_color_viridis(option = "B")
+
+```
+Alright, I am mostly satisfied with how that looks. working on adding a linear regression. just discovered there is apparently a native linear regression feature in ggplot - will try that first because nifty. 
+
+```{r}
+#filter values approaching zero
+SP4 <- SP3
+SP4$wgCERES_score <- signif(x = SP$wgCERES_score, digits = 4)
+SP4 %<>% filter(!(wgCERES_score == 0.0000))
+#re-estimate - played with the bandwidth estimators a lot.
+tic()
+SP4$wgCERES_score_depmap_density <- get_density(x = SP4$dependency, y = SP4$wgCERES_score, h=c(0.1, 2.5), n=500)
+toc()
+```
+
+```{r}
+#plot, with linear regression line.  
+
+ggplot(SP4) + 
+  geom_point( aes(x = dependency, y = wgCERES_score, color = wgCERES_score_depmap_density)) + scale_color_viridis(option = "A") +  geom_smooth(data = SP4, mapping = aes(x = dependency, y = wgCERES_score), method = 'lm', se = T) 
+```
+
+```{r}
+model <- lm(formula = SP4$dependency ~ SP4$wgCERES_score, data = SP4)
+summary(model)
+```
+so thats a pretty weak R-squared. If the eventual goal is a ML classifier, this is a perfectly fine weak predictor. Otherwise I don't quite know what to make of this. Also, I'm not 100% sure what this wgCERES_score is. It does not seem to convey the information that I thought it did (i.e., a measure of competitive growth for the DHSs). If it were, I would expect a stronger association. I need to dig deeper into what that score means, and for that matter into what the 'bins' mean. 
+
+Reading through the paper they did single cell RNA-seq to identify gene targets of the DHSs, which presumably would work better than the HI-C approach I proposed. Just need to keep pushing through this paper and cook up some new hypotheses. Most of my earlier ideas were predicated on screening using indels. The CRISPRi approach here messes that all up. 
+
+
+3/22/2021 didnt get much done here last week on account of immunology exam. pushing hard to make up for that this week. 
+
+first I need to try that linear model with each of the bins against depmap score. 
+
+```{r}
+SE_depmap %>% ggplot(aes(x = dependency, y = gRNA_score)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = bin2_score)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = bin3_score)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = dhs_score)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = gRNA_score_top3)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = bin2_score_top3)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = bin3_score_top3)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = dhs_score_top3)) +
+  geom_point()
+
+SE_depmap %>% ggplot(aes(x = dependency, y = wgCERES_score_top3)) +
+  geom_point()
+
+```
+so many zeroes. what does this look like if we filter them out?
+
+```{r}
+SE_depmap %>% filter(!(gRNA_score == 0)) %>% ggplot(aes(x = dependency, y = gRNA_score)) +
+  geom_point()
+
+SE_depmap %>% filter(!(bin2_score == 0)) %>% ggplot(aes(x = dependency, y = bin2_score)) +
+  geom_point()
+
+SE_depmap %>% filter(!(bin3_score == 0)) %>% ggplot(aes(x = dependency, y = bin3_score)) +
+  geom_point()
+
+SE_depmap %>% filter(!(dhs_score == 0)) %>% ggplot(aes(x = dependency, y = dhs_score)) +
+  geom_point()
+
+SE_depmap %>% filter(!(gRNA_score_top3 == 0)) %>% ggplot(aes(x = dependency, y = gRNA_score_top3)) +
+  geom_point()
+
+SE_depmap %>% filter(!(bin2_score_top3 == 0)) %>% ggplot(aes(x = dependency, y = bin2_score_top3)) +
+  geom_point()
+
+SE_depmap %>% filter(!(bin3_score_top3 == 0)) %>% ggplot(aes(x = dependency, y = bin3_score_top3)) +
+  geom_point()
+
+SE_depmap %>% filter(!(dhs_score_top3 == 0)) %>% ggplot(aes(x = dependency, y = dhs_score_top3)) +
+  geom_point()
+
+SE_depmap %>% filter(!(wgCERES_score_top3 == 0)) %>% ggplot(aes(x = dependency, y = wgCERES_score_top3)) +
+  geom_point()
+```
+
+One more quick plot with DHS score against dependency
+```{r}
+SE_depmap %>% ggplot(aes(x = dependency, y = dhs_score)) +
+  geom_point()
+```
+what if I just filtered on promoters/w/in 1kbp of TSS?
+
+```{r}
+SE_depmap %>% filter(distanceToTSS <= 1000) %>% filter(!(dhs_score == 0)) %>% ggplot(aes(x=dependency, y=dhs_score)) + geom_point()
+SE_depmap %>% filter(distanceToTSS <= 1000) %>% filter(!(wgCERES_score == 0)) %>% ggplot(aes(x=dependency, y=wgCERES_score)) + geom_point()
+```
+add in density info and redo linear model
+
+```{r}
+#clean out NAs, make data object for plotting
+SP5 <- SE_depmap %>% 
+      dplyr::select(name, geneId, gene_name, wgCERES_score,  dependency, distanceToTSS, dhs_score, dhs_score_nosig) %>% 
+      filter(!is.na(dependency)) %>%
+      filter(!is.na(wgCERES_score)) %>%
+      filter(!is.na(dhs_score)) %>%
+      filter(!(dhs_score == 0))
+#density estimation
+SP5$wgCERES_score_depmap_density <- get_density(x = SP5$dependency, y = SP5$wgCERES_score, h=c(0.1, 2.5), n=100)
+SP5$dhs_score_depmap_density <- get_density(x = SP5$dependency, y = SP5$dhs_score, h=c(0.1, 2.5), n=100)
+#plot with lm
+ggplot(SP5) + 
+  geom_point(aes(x = dependency, y = wgCERES_score, color = wgCERES_score_depmap_density)) + scale_color_viridis(option = "A") +  geom_smooth(data = SP5, mapping = aes(x = dependency, y = wgCERES_score), method = 'lm', se = T) 
+
+ggplot(SP5) + 
+  geom_point(aes(x = dependency, y = dhs_score, color = dhs_score_depmap_density)) + scale_color_viridis(option = "A") +  geom_smooth(data = SP5, mapping = aes(x = dependency, y = dhs_score), method = 'lm', se = T) 
+
+#hows the model look?
+model <- lm(formula = SP5$dependency ~ SP5$wgCERES_score, data = SP5)
+summary(model)
+
+model <- lm(formula = SP5$dependency ~ SP5$dhs_score, data = SP5)
+summary(model)
+```
+apparently there is some data from alejandro that uses adaptify to look at primate conservation of the DHSs. lets take a look at that.
+
+```{r}
+#read in selection/evolutionary data
+PC <- read_csv(file = here::here("Documents", "Wray Rotation", "Carl", "X_0011","data", "K562.selection.csv"))
+head(PC)
+```
+Okay, so I need to align these things by chromosome location. At a minimum, this means having start location, end location, and chromosome for each. The K562 selection data (PC, for Primate Conservation) contains a single column specifying the location. First up is going to be splitting this into three columns. Chromosome and start/end are separated by ":" and "-" respectively. Class is col_character. 
+
+```{r}
+#separate location column
+PC %<>% separate(col = chromosome, into = c("chrom", "chromPos"), sep = ":", remove = T) %>%
+  separate(col = chromPos, into = c("chromStart", "chromEnd"), sep = "-", remove = T)
+
+```
+
+how do I join these? Conceptually, I think where each range most overlaps another range? or perhaps some weighted average of all overlap? but then what do I actually average? screen values like wgCERES_score? or one of the metrics of conservation?
+
+Going to try using the GRanges stack and findOverlaps. 
+
+```{r}
+library(GenomicRanges)
+#added up in chunk #1 too, so that its there when I compile all this into something less note-y. 
+```
+need to make SE_depmap and PC into granges objects I think. 
+```{r}
+#convert SEdepmap to Grange
+SE_depmap_2 <- SE_depmap
+SE_depmap_2$strand <- NULL
+SE_GR <- makeGRangesFromDataFrame(df = SE_depmap_2, keep.extra.columns = T, ignore.strand = T, seqnames.field = "chrom", start.field = "chromStart", end.field = "chromEnd")
+#convert PC to granges
+PC_GR <- makeGRangesFromDataFrame(df = PC, keep.extra.columns = T, ignore.strand = T, seqnames.field = "chrom", start.field = "chromStart", end.field = "chromEnd")
+```
+now to join. 
+```{r}
+# PC_SE_hits <- findOverlaps(query = PC_GR, subject = SE_GR)
+#no metadata in hits. loading plyranges and trying with that join grammar
+#trying a few joins because they are not 100% intuitive. 
+PC_SE_joined <- join_overlap_left(x = SE_GR, y = PC_GR)
+summary(PC_SE_joined)
+PC_SE_joinded_df <- GenomicRanges::as.data.frame(PC_SE_joined)
+summary(PC_SE_joinded_df)
+summary(PC)
+```
+
+Looks like I have about 31k NAs in the joined data. Going to clean those out and ask about conservation and wgCERES scores. 
+
+```{r}
+#rename
+df <- PC_SE_joinded_df
+df %<>% filter(!is.na(pval.human))
+summary(df)
+
+
+#explore data
+
+#make data object for plotting
+SP6 <- df %>% 
+      dplyr::select(name, geneId, gene_name, wgCERES_score,  dependency, distanceToTSS, dhs_score, dhs_score_nosig, pval.human, pval.chimp, zeta.human, zeta.chimp, PP_con, PP_acc, PhastCons) 
+
+#plots
+#zeta human
+ggplot(SP6) + 
+  geom_point(aes(x = dhs_score_nosig, y = zeta.human, color = dependency)) + scale_color_viridis(option = "A")
+#zeta chimp
+ggplot(SP6) + 
+  geom_point(aes(x = dhs_score_nosig, y = zeta.chimp, color = dependency)) + scale_color_viridis(option = "A",) 
+
+```
+okay, this maybe looks like something. At worst, I think we have some decent weak classifiers. I'm going to try to implement some ML classifiers. Starting pretty simply with a package-based random forest. loaded the package back up in chunk 1 for ease of compiling later. 
+
+```{r}
+
+
+# random forest - make predictor df (excluding NAs) and output df with wgCERESscore. separate test sets
+rf_pred_df <- df %>% 
+      dplyr::select(wgCERES_score_nosig, dependency, distanceToTSS, zeta.human, zeta.chimp, PP_con, PP_acc, PhastCons, ploidyZhou, probIntolerantLoF, numTKOHits_Hart, H3K27ac_CPM_per_1kbp, chromHMM_cat_longest, wgCERES_score_top10) %>% 
+      filter(!is.na(dependency)) %>%                        #
+      filter(!is.na(probIntolerantLoF)) %>%                 ##
+      filter(!is.na(probIntolerantLoF)) %>%                 ### Get rid of NAs among important predictors.
+      filter(!is.na(numTKOHits_Hart)) %>%                   ##
+      filter(!is.na(H3K27ac_CPM_per_1kbp)) 
+
+rf_resp_df <- rf_pred_df %>%  #na.omit() %>%                 #   Making a response variable and omitting all nas (cant do this above, yet)
+      dplyr::select(wgCERES_score_nosig)                    #
+rf_pred_df$wgCERES_score_nosig <- NULL                      #   remove response from predictor set
+summary(rf_pred_df)                                         #
+nrow(rf_pred_df)                                            ### 
+summary(rf_resp_df)                                         ###  make sure NAs are gone and sets are correct number of rows. 
+nrow(rf_resp_df)                                            #
+
+# summary shows no na values. but still getting NA errors. backtracking to make removal explicit everywhere. 
+rf_pred_df %<>% na.omit()
+rf_resp_df %<>% na.omit()
+
+# test set data
+rf_pred_test <- rf_pred_df %>% filter(!is.na(wgCERES_score_top10))
+rf_resp_test <- rf_pred_test %>% dplyr::select(wgCERES_score_top10)
+rf_pred_test$wgCERES_score_top10 <- NULL
+rf_pred_test$wgCERES_score <- NULL
+rf_pred_df %<>% dplyr::select(!(wgCERES_score_top10))
+
+# remove test set observations from training set. Test set is that which has been validated by f/u screen. Arguably not the same output. trying anyways. 
+test_names <- rf_pred_test$name %>% as.list()
+rf_pred_df %<>% filter(!(name %in% test_names))
+rf_resp_df %<>% filter(!(name %in% test_names))
+rf_pred_df$wgCERES_score_top10 <- NULL
+
+#create response vectors
+rf_resp_vector <- as.vector(rf_resp_df$wgCERES_score_nosig)
+rf_resp_vector_test <- as.vector(rf_resp_test$wgCERES_score_top10)
+
+#Random forest regression. Tic/toc for timing. 
+
+tic()
+DHS_forest_notest <- randomForest(x = rf_pred_df, y = rf_resp_vector,  ntree = 1000)
+toc() #about 45 sec
+tic()
+DHS_forest_tested <- randomForest(x = rf_pred_df, y = rf_resp_vector,  ntree = 1000, xtest = rf_pred_test, ytest = rf_resp_vector_test)
+toc() #about 45 sec
+
+#how does my forest look?
+randomForest::varImpPlot(x = DHS_forest_tested, sort = TRUE, n.var = 12)
+randomForest::varImpPlot(x = DHS_forest_notest, sort = TRUE, n.var = 12)
+DHS_forest_varUsage <- randomForest::varUsed(x = DHS_forest_notest, count = T)
+DHS_forest_varUsage %<>% as.data.frame() %>% t()
+colnames(DHS_forest_varUsage) <- colnames(rf_pred_df)
+conde(DHS_forest_varUsage)
+
+#how does it perform using screen validation data?
+print(DHS_forest_tested)
+print(DHS_forest_notest)
+
+```
+
+well, that worked, but doesnt look like it performed very well. What gives? These may just be very weak predictors. Noteworthy that this is done with wgCERES_score_top10 as the response variable in the test set. Perhaps there is a better way to do this. I am going to try remaking the data and avoiding the use of the different validation metric. 
+
+```{r}
+rf_pred_df <- df %>% 
+      dplyr::select(wgCERES_score_nosig, dependency, distanceToTSS, zeta.human, zeta.chimp, PP_con, PP_acc, PhastCons, ploidyZhou, probIntolerantLoF, numTKOHits_Hart, H3K27ac_CPM_per_1kbp, chromHMM_cat_longest) %>% 
+      filter(!is.na(dependency)) %>%                        #
+      filter(!is.na(probIntolerantLoF)) %>%                 ##
+      filter(!is.na(probIntolerantLoF)) %>%                 ### Get rid of NAs among important predictors.
+      filter(!is.na(numTKOHits_Hart)) %>%                   ##
+      filter(!is.na(H3K27ac_CPM_per_1kbp))                  #
+```
