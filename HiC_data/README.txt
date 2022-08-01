@@ -13,4 +13,4 @@ you can find documentation of the original pipeline here: https://hicexplorer.re
   restriction sites per bin". You can do this by first printing the diagnostic plot, then running the HiCexplorer correction pipeline, both of
   which can be done by running hicCorrectMatrix.sh
 6. With the HiC matrix corrected, you can print it with hicPlotMatrix.sh
-7. hicTADs.sh will identify and display the TADs in the HiCmatrix.
+7. hicTADs.sh will identify and display the TADs in the HiC_matrix_corrected.h5 file(s)
